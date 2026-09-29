@@ -1,0 +1,1 @@
+export default function Status({value}){const label=typeof value==='string'||typeof value==='number'?String(value):'Unknown';const key=label.toLowerCase().replaceAll(' ','-');return <span className={`badge ${key}`}>{label}</span>}

@@ -2,12 +2,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Ticket, Technician
+from app.services.auth import require_roles
+from app.models import Ticket, Technician, TicketMessage, User
 from app.services.workload import recalculate_workloads
-from app.schemas import TicketCreate, TicketOut, TicketUpdate, TechnicianAssignment
+from app.schemas import TicketCreate, TicketOut, TicketUpdate, TechnicianAssignment, TicketMessageCreate
 from app.services.intelligence import calculate_priority, classify_ticket
 
-router=APIRouter(prefix="/api/tickets", tags=["Tickets"])
+router=APIRouter(prefix="/api/tickets", tags=["Tickets"], dependencies=[Depends(require_roles("technician", "admin"))])
 @router.get("", response_model=list[TicketOut])
 def list_tickets(q:str|None=None, status:str|None=None, db:Session=Depends(get_db)):
     items=db.query(Ticket).order_by(Ticket.created_at.desc()).all()
@@ -64,3 +65,17 @@ def unassign_ticket(ticket_id:int,db:Session=Depends(get_db)):
         ticket.assigned_technician=None
     recalculate_workloads(db)
     db.commit();db.refresh(ticket);return ticket
+
+@router.post("/{ticket_id}/messages",status_code=201)
+def add_technician_message(ticket_id:int,data:TicketMessageCreate,db:Session=Depends(get_db),user:User=Depends(require_roles("technician","admin"))):
+    ticket=db.get(Ticket,ticket_id)
+    if not ticket: raise HTTPException(404,"Ticket not found")
+    message=TicketMessage(ticket_id=ticket_id,user_id=user.id,body=data.body.strip())
+    db.add(message);db.commit();db.refresh(message)
+    return {"id":message.id,"body":message.body,"created_at":message.created_at,"author":user.full_name}
+
+@router.get("/{ticket_id}/messages")
+def list_ticket_messages(ticket_id:int,db:Session=Depends(get_db)):
+    if not db.get(Ticket,ticket_id): raise HTTPException(404,"Ticket not found")
+    messages=db.query(TicketMessage).filter_by(ticket_id=ticket_id).order_by(TicketMessage.created_at).all()
+    return [{"id":m.id,"body":m.body,"created_at":m.created_at,"author":(db.get(User,m.user_id).full_name if db.get(User,m.user_id) else "IT Support")} for m in messages]

@@ -2,12 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db
-from app.models import Incident, Technician, Ticket
+from app.services.auth import require_roles
+from app.models import Incident, Technician, Ticket, User
 from app.schemas import TechnicianCreate, TechnicianOut, TechnicianUpdate
 from app.services.intelligence import recommend_technician
 from app.services.workload import recalculate_workloads
 
-router=APIRouter(prefix="/api/technicians",tags=["Technicians"])
+router=APIRouter(prefix="/api/technicians",tags=["Technicians"],dependencies=[Depends(require_roles("technician", "admin"))])
 
 def get_technician_or_404(technician_id:int,db:Session)->Technician:
     technician=db.get(Technician,technician_id)
@@ -28,7 +29,7 @@ def recommend(category:str,location:str,db:Session=Depends(get_db)):
     return {"technician":TechnicianOut.model_validate(tech) if tech else None,"explanation":explanation}
 
 @router.post("",response_model=TechnicianOut,status_code=201)
-def create_technician(data:TechnicianCreate,db:Session=Depends(get_db)):
+def create_technician(data:TechnicianCreate,db:Session=Depends(get_db),user:User=Depends(require_roles("admin"))):
     existing=db.query(Technician).filter(Technician.name.ilike(data.name)).first()
     if existing: raise HTTPException(409,"A technician with this name already exists")
     technician=Technician(**data.model_dump(),current_workload=0)
@@ -48,7 +49,7 @@ def get_technician(technician_id:int,db:Session=Depends(get_db)):
     return technician
 
 @router.put("/{technician_id}",response_model=TechnicianOut)
-def update_technician(technician_id:int,data:TechnicianUpdate,db:Session=Depends(get_db)):
+def update_technician(technician_id:int,data:TechnicianUpdate,db:Session=Depends(get_db),user:User=Depends(require_roles("admin"))):
     technician=get_technician_or_404(technician_id,db)
     existing=db.query(Technician).filter(Technician.name.ilike(data.name),Technician.id!=technician_id).first()
     if existing: raise HTTPException(409,"A technician with this name already exists")
@@ -68,7 +69,7 @@ def update_technician(technician_id:int,data:TechnicianUpdate,db:Session=Depends
     return technician
 
 @router.delete("/{technician_id}",status_code=204)
-def delete_technician(technician_id:int,db:Session=Depends(get_db)):
+def delete_technician(technician_id:int,db:Session=Depends(get_db),user:User=Depends(require_roles("admin"))):
     technician=get_technician_or_404(technician_id,db)
     active_tickets=db.query(Ticket).filter(Ticket.assigned_technician==technician.name,Ticket.status!="Resolved").count()
     active_incidents=db.query(Incident).filter(Incident.recommended_technician==technician.name,Incident.status!="Resolved").count()

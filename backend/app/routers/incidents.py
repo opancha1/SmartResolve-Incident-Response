@@ -2,20 +2,21 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Incident, IncidentRelationship, NetworkEvent, SecurityEvent, Ticket, Technician
+from app.services.auth import require_roles
+from app.models import AvailabilityState, Incident, IncidentRelationship, NetworkEvent, SecurityEvent, Ticket, Technician, User
 from app.schemas import IncidentOut, StatusUpdate
 from app.services.intelligence import cosine_similarity, recommend_technician
-router=APIRouter(prefix="/api/incidents",tags=["Incidents"])
+router=APIRouter(prefix="/api/incidents",tags=["Incidents"],dependencies=[Depends(require_roles("technician", "admin"))])
 @router.get("",response_model=list[IncidentOut])
 def list_incidents(q:str|None=None,db:Session=Depends(get_db)):
     items=db.query(Incident).order_by(Incident.created_at.desc()).all();return[i for i in items if not q or q.lower() in f"{i.title} {i.location} {i.category}".lower()]
 @router.get("/{incident_id}")
-def detail(incident_id:int,db:Session=Depends(get_db)):
+def detail(incident_id:int,db:Session=Depends(get_db),user:User=Depends(require_roles("technician","admin"))):
     incident=db.get(Incident,incident_id)
     if not incident: raise HTTPException(404,"Incident not found")
     rels=db.query(IncidentRelationship).filter_by(incident_id=incident_id).all()
-    lookup={"ticket":Ticket,"network":NetworkEvent,"security":SecurityEvent}
-    evidence=[{"type":r.related_type,"reason":r.reason,"item":db.get(lookup[r.related_type],r.related_id)} for r in rels]
+    lookup={"ticket":Ticket,"network":NetworkEvent,"security":SecurityEvent,"availability":AvailabilityState}
+    evidence=[{"type":r.related_type,"reason":r.reason,"item":db.get(lookup[r.related_type],r.related_id)} for r in rels if r.related_type!="security" or user.role=="admin" or user.security_access]
     return {"incident":IncidentOut.model_validate(incident),"relationships":evidence}
 @router.patch("/{incident_id}/status",response_model=IncidentOut)
 def update_status(incident_id:int,data:StatusUpdate,db:Session=Depends(get_db)):

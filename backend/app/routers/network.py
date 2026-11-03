@@ -2,10 +2,11 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.services.auth import require_roles
 from app.models import NetworkEvent
 from app.schemas import EventNetworkCreate, NetworkOut
 from app.services.intelligence import network_severity, network_reason
-router=APIRouter(prefix="/api/network-events", tags=["Network"])
+router=APIRouter(prefix="/api/network-events", tags=["Network"],dependencies=[Depends(require_roles("technician", "admin"))])
 DEMO_LOCATIONS=("Atkins","Mebane","Grainger","Friday")
 @router.get("", response_model=list[NetworkOut])
 def list_events(q:str|None=None,db:Session=Depends(get_db)):

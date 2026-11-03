@@ -1,8 +1,8 @@
 // Keep the API host aligned with the confirmed local FastAPI endpoint.
-const BASE="http://127.0.0.1:8000/api";
+const BASE=`${import.meta.env.VITE_API_URL||"http://127.0.0.1:8000"}/api`;
 export async function api(path, options={}) {
  let response;
- try{response=await fetch(`${BASE}${path}`,{headers:{"Content-Type":"application/json"},...options})}
+ try{response=await fetch(`${BASE}${path}`,{headers:{"Content-Type":"application/json",...(localStorage.getItem("sr_token")?{Authorization:`Bearer ${localStorage.getItem("sr_token")}`}:{})},...options})}
  catch(error){throw new Error(`Unable to reach the SmartResolve API at ${BASE}. ${error?.message||'Check that FastAPI is running.'}`)}
  if(response.status===204)return null;
  let payload;

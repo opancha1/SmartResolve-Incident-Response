@@ -251,3 +251,53 @@
  .operations-sidebar .sidebar-brand-row{justify-content:flex-start}
 }
 @media(prefers-reduced-motion:reduce){.operations-shell>main,.operations-shell .operations-sidebar,.sidebar-nav-link,.operations-sidebar button,.sidebar-footer-link{transition:none}}
+
+.operations-sidebar .sidebar-nav-link:not(:focus-visible) { outline: none; box-shadow: none; }
+.operations-sidebar .sidebar-nav-link.is-active::before { width: 2px; }
+.operations-dialog { position: fixed; inset: 0; margin: auto; max-height: min(90dvh, 54rem); color: var(--ink); border: 1px solid var(--line); }
+.operations-dialog::backdrop { background: #071321a8; }
+.operations-dialog .form textarea { min-height: 4rem; resize: vertical; color: var(--ink); background: var(--input-surface); border: 1px solid var(--line); border-radius: 5px; padding: 9px; font: inherit; }
+.operations-dialog .modal-head { align-items: center; }
+.operations-dialog .modal-head h2 { overflow-wrap: anywhere; }
+.ticket-queue, .workspace-table, .availability-table { overflow-x: auto; }
+.ticket-queue table { min-width: 1060px; }
+.workspace-table table { min-width: 880px; }
+.ticket-queue td:first-child, .ticket-queue td:nth-last-child(-n+2), .workspace-table td { white-space: nowrap; }
+.ticket-queue td:nth-child(2), .workspace-table td:first-child { min-width: 180px; white-space: normal; }
+.availability-row { box-shadow: none; }
+.record-source { display: block; margin-top: 4px; color: var(--muted); }
+.table-pagination, .investigation-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.table-pagination { justify-content: flex-end; padding-inline: 12px; }
+.investigation-row p { margin: 4px 0 0; color: var(--muted); }
+.investigation-row > button { flex: 0 0 auto; }
+.scenario-recommendations { margin-bottom: 16px; }
+.scenario-recommendations h2 { margin-bottom: 12px; }
+.investigation-section, .intelligence-summary { margin: 18px 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.investigation-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.investigation-timeline time { color: var(--muted); margin-left: 6px; }
+.investigation-timeline li { margin-bottom: 8px; }
+@media (max-width: 600px) {
+ .operations-dialog { width: calc(100% - 20px); max-height: 94dvh; padding: 14px; }
+ .investigation-fields { grid-template-columns: 1fr; }
+ .investigation-row { align-items: flex-start; flex-wrap: wrap; }
+}
+.filters input[type="checkbox"] { flex: none; min-width: 0; width: auto; }
+
+.operations-shell .metrics .metric { border: 1px solid var(--line) !important; background: var(--surface) !important; min-height: 94px; align-items: flex-start; }
+.operations-shell .metrics .metric strong { color: var(--ink); font-size: 28px; }
+.operations-shell .metrics .metric span { color: var(--text-soft); }
+.operations-shell .metrics .metric-icon { display: grid; place-items: center; color: var(--text-soft); background: var(--surface-muted); flex-shrink: 0; }
+.operations-shell .metrics.five { grid-template-columns: repeat(5,minmax(0,1fr)); }
+.availability-details { align-items: start; }
+.availability-window { padding: 12px 0; margin: 12px 0; border-block: 1px solid var(--line); }
+.availability-window p { margin: 6px 0; }
+.availability-window small { color: var(--muted); }
+.risk-indicator { display: grid; gap: 4px; min-width: 62px; }
+.risk-indicator meter { width: 60px; height: 7px; }
+.operations-shell .table-wrap th { background: var(--surface-muted); color: var(--text-soft); }
+.operations-shell .table-wrap tbody tr:hover { background: var(--surface-muted); }
+@media (max-width: 1160px) { .operations-shell .metrics.five { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media (max-width: 650px) { .operations-shell .metrics.five { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+
+.auth-loading .connect-brand { justify-content: center; }
+.auth-loading p { display: flex; align-items: center; justify-content: center; gap: 9px; margin: 18px 0 0; }

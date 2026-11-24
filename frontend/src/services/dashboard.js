@@ -5,7 +5,7 @@ export function timestamp(value){
 }
 export const formatTime=value=>Number.isFinite(timestamp(value))?new Date(timestamp(value)).toLocaleString():'Not checked';
 export const priorityTickets=tickets=>tickets.filter(t=>t.status!=='Resolved').sort((a,b)=>b.priority-a.priority||timestamp(a.created_at)-timestamp(b.created_at)||a.id-b.id).slice(0,5);
-export const isTestEndpoint=e=>/\b(?:demo|test)\b/i.test(e.building||'');
+export const isTestEndpoint=e=>e.is_test??/\b(?:demo|test)\b/i.test(e.building||'');
 export function recentActivity(tickets,incidents){
  const events=[];
  for(const [kind,items,page] of [['Ticket',tickets,'tickets'],['Incident',incidents,'incidents']]){

@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import Status from '../components/Status';
 import { ErrorState, Loading } from '../components/PageState';
 
-const SPECIALIZATIONS = ['Network', 'Security', 'Hardware', 'Software', 'Classroom Technology'];
+const SPECIALIZATIONS = ['Network', 'Security', 'Hardware', 'Software', 'Classroom Technology', 'Account'];
 const blankForm = { name: '', specialization: '', location: '', availability: 'true' };
 
 export default function Technicians({ refresh, setRefresh }) {
@@ -108,7 +108,7 @@ export default function Technicians({ refresh, setRefresh }) {
       const initials = technician.name.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
       return <article className="tech-card" key={technician.id}>
         <div className="avatar">{initials}</div><div className="tech-head"><h2>{technician.name}</h2><Status value={technician.availability ? 'Available' : 'Unavailable'}/></div>
-        <p>{technician.specialization} specialist · {technician.location}</p>
+        <p>{technician.specialization} specialist · {technician.location}{technician.demo_key ? ' · Simulated Demo' : ''}</p>
         <div className="workload"><span>Current workload</span><b>{technician.current_workload ?? 0} active task{technician.current_workload === 1 ? '' : 's'}</b></div>
         <div className="recommend"><b>Assigned tickets:</b>{assigned.length ? assigned.map(ticket => <span key={ticket.id}>#{ticket.id} · {ticket.title} · {ticket.status}</span>) : <small>No active ticket assignments</small>}</div>
         <div className="technician-actions"><button className="secondary-button" onClick={() => openEdit(technician)}>Edit</button><button className="danger-button" onClick={() => requestDelete(technician)}>Delete</button></div>

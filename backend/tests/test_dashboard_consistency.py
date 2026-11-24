@@ -18,11 +18,12 @@ def test_overview_metrics_match_detail_api_records(monkeypatch):
         security = get("security-events")
         metrics = get("dashboard")["metrics"]
         assert metrics["open_tickets"] == sum(t["status"] != "Resolved" for t in tickets)
+        assert metrics["open_status_tickets"] == sum(t["status"] == "Open" for t in tickets)
         assert metrics["active_incidents"] == sum(i["status"] != "Resolved" for i in incidents)
         assert metrics["critical_issues"] == sum(r["status"] != "Resolved" and r["priority"] > 75 for r in tickets + incidents)
         assert metrics["monitored_endpoints"] == len(endpoints)
         assert metrics["offline_endpoints"] == sum(e["status"] == "Offline" for e in endpoints)
-        assert metrics["security_alerts"] == sum(e["severity"] in ("High", "Critical") for e in security)
+        assert metrics["security_alerts"] == sum(e["status"] != "Resolved" and e["severity"] in ("High", "Critical") for e in security)
         for technician in get("technicians"):
             assert technician["current_workload"] == sum(t["status"] != "Resolved" and t["assigned_technician"] == technician["name"] for t in tickets)
         if tickets:

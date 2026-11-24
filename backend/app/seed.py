@@ -1,11 +1,11 @@
-from app.database import Base, SessionLocal, engine
+from app.database import SessionLocal
 from app.models import Technician
 from app.routers.network import create_event
 from app.routers.security import create_event as create_security
 from app.routers.tickets import create_ticket
 from app.schemas import EventNetworkCreate, SecurityCreate, TicketCreate
 def seed():
-    Base.metadata.create_all(engine);db=SessionLocal()
+    db=SessionLocal()
     if db.query(Technician).count(): db.close();return
     db.add_all([Technician(name="Maya Chen",specialization="Network",location="Woodward",current_workload=1,availability=True),Technician(name="Jordan Rivera",specialization="Security",location="Campus Center",current_workload=2,availability=True),Technician(name="Sam Wilson",specialization="Hardware",location="Woodward",current_workload=0,availability=True)])
     db.commit()
@@ -15,4 +15,23 @@ def seed():
     create_event(EventNetworkCreate(location="Woodward",latency=240,packet_loss=21,availability=True,event_type="High latency and packet loss"),db)
     create_security(SecurityCreate(event_type="Failed login",username="demo.student",location="Library",failed_attempts=3),db)
     db.close()
-if __name__=="__main__":seed()
+if __name__=="__main__":
+    import argparse
+    import json
+    from sqlalchemy import text
+    from app.main import initialize_database
+    from app.services.capstone import load_capstone
+    from app.services.demo_config import demo_enabled
+
+    parser = argparse.ArgumentParser(description="Load SmartResolve synthetic demo data.")
+    parser.add_argument("--capstone", action="store_true", help="Load the curated presentation dataset.")
+    args = parser.parse_args()
+    if not demo_enabled():
+        raise SystemExit("Set SMARTRESOLVE_DEMO_ENABLED=1 in a development environment")
+    initialize_database()
+    if args.capstone:
+        with SessionLocal() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            summary = load_capstone(db)
+            db.commit()
+        print(json.dumps(summary))

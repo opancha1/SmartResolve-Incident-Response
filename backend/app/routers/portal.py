@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AvailabilityState, MonitoredEndpoint, Ticket, TicketMessage, User
-from app.schemas import PortalTicketCreate, TicketMessageCreate, TicketOut, UserOut
+from app.schemas import ChatRequest, PortalTicketCreate, TicketMessageCreate, TicketOut, UserOut
+from app.services.clock import wire_utc
 from app.services.auth import require_roles
 from app.services.availability import effective_status, ticket_matches_building
 from app.services.intelligence import calculate_priority, classify_ticket
@@ -17,7 +18,7 @@ def relevant_network_status(location:str,user:User=Depends(require_roles("user")
         state=db.query(AvailabilityState).filter_by(endpoint_id=endpoint.id).first()
         status,reason=effective_status(state)
         source="Simulated Demo" if endpoint.mode=="demo" else "Live Endpoint"
-        item={"building":endpoint.building,"status":status,"source":source,"last_checked_at":state.last_checked_at if state else None}
+        item={"building":endpoint.building,"status":status,"source":source,"last_checked_at":wire_utc(state.last_checked_at) if state and state.last_checked_at else None}
         if status=="Offline":
             item["notice"]=(f"A monitored endpoint associated with {endpoint.building} is currently Offline. "
                 f"{state.consecutive_failures if state else 0} consecutive failed check(s). "
@@ -35,7 +36,7 @@ def my_tickets(q: str | None = None, status: str | None = None, user: User = Dep
 @router.post("/tickets", status_code=201, response_model=TicketOut)
 def create_my_ticket(data: PortalTicketCreate, user: User = Depends(require_roles("user")), db: Session = Depends(get_db)):
     category = data.category or classify_ticket(data.title, data.description)
-    ticket = Ticket(**data.model_dump(exclude={"category"}), category=category, owner_id=user.id,
+    ticket = Ticket(**data.model_dump(exclude={"category"}), category=category, owner_id=user.id, classification_corrected=bool(data.category),
         priority=calculate_priority(data.affected_users, data.severity, data.location, category == "Security"))
     db.add(ticket); db.commit(); db.refresh(ticket); return ticket
 @router.get("/tickets/{ticket_id}")
@@ -52,9 +53,9 @@ def add_message(ticket_id: int, data: TicketMessageCreate, user: User = Depends(
     db.add(message); db.commit(); db.refresh(message)
     return {"id":message.id,"body":message.body,"created_at":message.created_at}
 @router.post("/assistant")
-def assistant(data: dict, user: User = Depends(require_roles("user")), db: Session = Depends(get_db)):
+def assistant(data: ChatRequest, user: User = Depends(require_roles("user")), db: Session = Depends(get_db)):
     # Controlled no-LLM fallback; it suggests safe checks and never performs actions.
-    message = str(data.get("message", "")).strip()[:2000]
+    message = data.message.strip()
     if not message: raise HTTPException(422, "Message is required")
     low = message.lower()
     if any(word in low for word in ("wifi", "wi-fi", "internet", "network")):

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.services.auth import require_roles
-from app.models import Incident, Technician, Ticket, User
+from app.models import Incident, SecurityEvent, Technician, Ticket, User
 from app.schemas import TechnicianCreate, TechnicianOut, TechnicianUpdate
 from app.services.intelligence import recommend_technician
 from app.services.workload import recalculate_workloads
@@ -56,6 +56,7 @@ def update_technician(technician_id:int,data:TechnicianUpdate,db:Session=Depends
     old_name=technician.name
     values=data.model_dump()
     if old_name!=values["name"]:
+        rename_assignments(db, old_name, values["name"])
         db.query(Ticket).filter(Ticket.assigned_technician==old_name).update({Ticket.assigned_technician:values["name"]},synchronize_session=False)
         db.query(Incident).filter(Incident.recommended_technician==old_name).update({Incident.recommended_technician:values["name"]},synchronize_session=False)
     for key,value in values.items(): setattr(technician,key,value)
@@ -73,10 +74,18 @@ def delete_technician(technician_id:int,db:Session=Depends(get_db),user:User=Dep
     technician=get_technician_or_404(technician_id,db)
     active_tickets=db.query(Ticket).filter(Ticket.assigned_technician==technician.name,Ticket.status!="Resolved").count()
     active_incidents=db.query(Incident).filter(Incident.recommended_technician==technician.name,Incident.status!="Resolved").count()
-    if active_tickets or active_incidents:
+    active_investigations = any(db.query(model).filter(model.assigned_technician == technician.name,
+                                model.status != "Resolved").first() for model in (Incident, SecurityEvent))
+    if active_tickets or active_incidents or active_investigations:
         raise HTTPException(409,"Cannot delete this technician because they have active assignments. Please reassign or unassign their active tickets first.")
     # Clear inactive historical string references before removal so no record
     # points to a technician that no longer exists.
     db.query(Ticket).filter(Ticket.assigned_technician==technician.name).update({Ticket.assigned_technician:None},synchronize_session=False)
     db.query(Incident).filter(Incident.recommended_technician==technician.name).update({Incident.recommended_technician:None},synchronize_session=False)
+    rename_assignments(db, technician.name, None)
     db.delete(technician);db.commit()
+
+
+def rename_assignments(db, old_name, new_name):
+    for model in (Incident, SecurityEvent):
+        db.query(model).filter(model.assigned_technician == old_name).update({model.assigned_technician: new_name})

@@ -7,6 +7,9 @@ import time
 from urllib.parse import urlparse
 import httpx
 from sqlalchemy.orm import Session
+from app.services.clock import now_utc, utc_naive
+from app.services.locations import same_building as ticket_matches_building
+from app.services.demo_config import demo_enabled
 from app.models import AvailabilityCheck, AvailabilityState, MonitoredEndpoint, Ticket
 
 MIN_CHECK_INTERVAL_SECONDS = 15
@@ -19,21 +22,9 @@ DEMO_BUILDINGS = (
     ("College of Computing and Informatics building", "online"),
     ("Demo Cycle Building", "cycle"),
 )
-# Aliases connect synthetic building names to the existing ticket location strings.
-BUILDING_ALIASES = {
-    "woodward hall": ("woodward",),
-    "atkins library": ("atkins",),
-    "student union": ("student union", "campus center"),
-    "college of computing and informatics building": ("college of computing", "cci"),
-}
-
 class AvailabilityRateLimited(Exception):
     pass
 
-def ticket_matches_building(ticket_location: str, building: str) -> bool:
-    location=(ticket_location or "").strip().casefold()
-    aliases=BUILDING_ALIASES.get(building.strip().casefold(),(building.strip().casefold(),))
-    return any(location==alias or location.startswith(alias+" ") or location.startswith(alias+",") for alias in aliases)
 
 def related_open_tickets(db: Session, building: str) -> list[Ticket]:
     tickets=db.query(Ticket).filter(Ticket.status!="Resolved").order_by(Ticket.created_at.desc()).all()
@@ -52,9 +43,11 @@ def monitor_interval_seconds() -> int:
 def effective_status(state: AvailabilityState | None, now: datetime | None=None) -> tuple[str,str|None]:
     if state is None or state.last_checked_at is None:
         return "Unknown", "No valid availability check has been recorded yet."
-    now=now or datetime.utcnow()
-    if (now-state.last_checked_at).total_seconds()>monitor_interval_seconds()*STALE_INTERVAL_MULTIPLIER:
+    now=utc_naive(now) if now is not None else now_utc()
+    if (now-utc_naive(state.last_checked_at)).total_seconds()>monitor_interval_seconds()*STALE_INTERVAL_MULTIPLIER:
         return "Unknown", f"Monitoring data is stale; the last check was more than {STALE_INTERVAL_MULTIPLIER} monitoring intervals ago."
+    if utc_naive(state.last_checked_at) > now + timedelta(seconds=5):
+        return "Unknown", "The latest check is ahead of the server clock."
     return state.status,state.error_details
 
 def effective_endpoint_status(endpoint: MonitoredEndpoint, state: AvailabilityState | None,
@@ -99,9 +92,10 @@ def _resolve_approved_target(target: str) -> None:
 def probe_endpoint(endpoint: MonitoredEndpoint, demo_index: int=0) -> tuple[str,float|None,str|None]:
     """Return Online, Failed, or Unknown; never leak transport exception details."""
     if endpoint.mode=="demo":
-        if endpoint.demo_scenario=="online": return "Online", 34.0 if "Woodward" in endpoint.building else 52.0, None
-        if endpoint.demo_scenario=="offline": return "Failed", None, "Synthetic demo endpoint did not respond."
-        if endpoint.demo_scenario=="cycle":
+        scenario = (endpoint.scenario_override if demo_enabled() else None) or endpoint.demo_scenario
+        if scenario=="online": return "Online", 34.0 if "Woodward" in endpoint.building else 52.0, None
+        if scenario=="offline": return "Failed", None, "Synthetic demo endpoint did not respond."
+        if scenario=="cycle":
             # Persisted check count selects the next deterministic phase.
             phases=("Online","Online","Failed","Failed","Unknown")
             phase=phases[demo_index%len(phases)]
@@ -131,50 +125,31 @@ def probe_endpoint(endpoint: MonitoredEndpoint, demo_index: int=0) -> tuple[str,
 
 def seed_demo_endpoints(db: Session) -> None:
     """Insert stable illustrative results without overwriting existing configuration."""
-    if db.query(MonitoredEndpoint).count():
-        existing={endpoint.building for endpoint in db.query(MonitoredEndpoint).all()}
-    else:
-        existing=set()
-    now=datetime.utcnow()
-    for building,scenario in DEMO_BUILDINGS:
+    existing = {endpoint.building for endpoint in db.query(MonitoredEndpoint).all()}
+    for building, scenario in DEMO_BUILDINGS:
         if building in existing:
             continue
-        endpoint=MonitoredEndpoint(building=building,mode="demo",demo_scenario=scenario,enabled=True,
-                                   timeout_seconds=2.0,failure_threshold=2)
-        db.add(endpoint);db.flush()
-        if scenario=="online":
-            checked=now-timedelta(minutes=7 if "Woodward" in building else 12)
-            state=AvailabilityState(endpoint_id=endpoint.id,status="Online",consecutive_failures=0,
-                last_checked_at=checked,last_success_at=checked,response_ms=34.0 if "Woodward" in building else 52.0)
-            db.add(state);db.add(AvailabilityCheck(endpoint_id=endpoint.id,result="Online",status_after_check="Online",response_ms=state.response_ms,checked_at=checked))
-        elif scenario=="offline":
-            success=now-timedelta(minutes=54);failed1=now-timedelta(minutes=6);failed2=now-timedelta(minutes=3)
-            state=AvailabilityState(endpoint_id=endpoint.id,status="Offline",consecutive_failures=2,
-                last_checked_at=failed2,last_success_at=success,response_ms=None,
-                error_details="Two consecutive simulated checks did not respond.")
-            db.add(state)
-            db.add(AvailabilityCheck(endpoint_id=endpoint.id,result="Online",status_after_check="Online",response_ms=41.0,checked_at=success))
-            db.add(AvailabilityCheck(endpoint_id=endpoint.id,result="Failed",status_after_check="Online",error_details="Synthetic demo endpoint did not respond.",checked_at=failed1))
-            db.add(AvailabilityCheck(endpoint_id=endpoint.id,result="Failed",status_after_check="Offline",error_details="Synthetic demo endpoint did not respond.",checked_at=failed2))
-        elif scenario=="cycle":
-            state=AvailabilityState(endpoint_id=endpoint.id,status="Unknown",consecutive_failures=0,
-                error_details="Waiting for the first scheduled check in the repeatable demo cycle.")
-            db.add(state)
-        else:
-            checked=now-timedelta(minutes=2)
-            state=AvailabilityState(endpoint_id=endpoint.id,status="Unknown",consecutive_failures=0,
-                last_checked_at=checked,last_success_at=None,response_ms=None,
-                error_details="Synthetic demo monitor is unavailable for this endpoint.")
-            db.add(state);db.add(AvailabilityCheck(endpoint_id=endpoint.id,result="Unknown",status_after_check="Unknown",error_details=state.error_details,checked_at=checked))
+        endpoint = MonitoredEndpoint(building=building, mode="demo", demo_scenario=scenario, enabled=True,
+                                     timeout_seconds=2.0, failure_threshold=2)
+        db.add(endpoint)
+        db.flush()
+        if scenario == "cycle":
+            db.add(AvailabilityState(endpoint_id=endpoint.id, status="Unknown", consecutive_failures=0,
+                                     error_details="Waiting for the first scheduled demo check."))
+            continue
+        checks = endpoint.failure_threshold if scenario == "offline" else 1
+        for _ in range(checks):
+            run_check(db, endpoint, scenario_check=True)
     db.commit()
 
-def run_check(db: Session, endpoint: MonitoredEndpoint, now: datetime | None=None) -> tuple[AvailabilityState,AvailabilityCheck]:
-    now=now or datetime.utcnow()
+def run_check(db: Session, endpoint: MonitoredEndpoint, now: datetime | None=None, *, scenario_check=False) -> tuple[AvailabilityState,AvailabilityCheck]:
+    now=utc_naive(now) if now is not None else now_utc()
     state=db.query(AvailabilityState).filter_by(endpoint_id=endpoint.id).first()
     if not state:
         state=AvailabilityState(endpoint_id=endpoint.id,status="Unknown",consecutive_failures=0)
         db.add(state);db.flush()
-    if state.last_checked_at and (now-state.last_checked_at).total_seconds()<MIN_CHECK_INTERVAL_SECONDS:
+    elapsed = (now - utc_naive(state.last_checked_at)).total_seconds() if state.last_checked_at else None
+    if not scenario_check and elapsed is not None and 0 <= elapsed < MIN_CHECK_INTERVAL_SECONDS:
         raise AvailabilityRateLimited("Please wait at least 15 seconds between checks for this endpoint.")
     if not endpoint.enabled:
         outcome,response_ms,error="Unknown",None,"Monitoring is disabled for this endpoint."
@@ -187,17 +162,19 @@ def run_check(db: Session, endpoint: MonitoredEndpoint, now: datetime | None=Non
     if outcome=="Online":
         state.status="Online";state.consecutive_failures=0;state.last_success_at=now;state.error_details=None
     elif outcome=="Failed":
-        state.consecutive_failures+=1
+        state.consecutive_failures = min(endpoint.failure_threshold, state.consecutive_failures + 1)
         if state.consecutive_failures>=endpoint.failure_threshold:
             state.status="Offline"
             state.error_details=error or "Endpoint did not respond."
         else:
-            state.error_details=f"One failed check of {endpoint.failure_threshold} consecutive failures; previous status retained."
+            state.status = effective_status(state, now)[0]
+            state.error_details = f"{state.consecutive_failures} of {endpoint.failure_threshold} consecutive checks failed."
     else:
         state.status="Unknown";state.consecutive_failures=0
         state.error_details=error or "Monitoring could not confirm endpoint availability."
     state.last_checked_at=now;state.response_ms=response_ms
     check=AvailabilityCheck(endpoint_id=endpoint.id,result=outcome,status_after_check=state.status,
-                            response_ms=response_ms,error_details=error,checked_at=now)
+                            response_ms=response_ms,error_details=error,checked_at=now,
+                            generated_demo=bool(endpoint.scenario_override and demo_enabled()))
     db.add(check);db.flush()
     return state,check

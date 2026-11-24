@@ -3,10 +3,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from app.database import Base, SessionLocal, engine
-from app.routers import auth, availability, dashboard, incidents, locations, network, portal, security, technicians, tickets
+from app.routers import auth, availability, dashboard, demo, incidents, locations, network, portal, security, technicians, tickets
 from app.services.availability import seed_demo_endpoints
 from app.services.monitor_scheduler import monitor_scheduler_loop, scheduler_enabled
 from app.seed import seed
+from app.migrations import migrate_operations
+from app.services.demo_config import demo_enabled
 app=FastAPI(title="SmartResolve API",version="1.0.0")
 monitor_task=None
 app.add_middleware(
@@ -16,14 +18,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(auth.router);app.include_router(portal.router);app.include_router(tickets.router);app.include_router(network.router);app.include_router(availability.router);app.include_router(security.router);app.include_router(technicians.router);app.include_router(incidents.router);app.include_router(dashboard.router);app.include_router(locations.router)
+app.include_router(demo.router);app.include_router(auth.router);app.include_router(portal.router);app.include_router(tickets.router);app.include_router(network.router);app.include_router(availability.router);app.include_router(security.router);app.include_router(technicians.router);app.include_router(incidents.router);app.include_router(dashboard.router);app.include_router(locations.router)
 def migrate_legacy_network_locations():
-    # Update only the location field; IDs, metrics, timestamps and severities stay put.
     with engine.begin() as connection:
-        legacy=connection.execute(text("SELECT id FROM network_events WHERE location='Test Hall' ORDER BY timestamp, id")).all()
-        buildings=("Atkins","Mebane","Grainger","Friday")
-        for index,row in enumerate(legacy):
-            connection.execute(text("UPDATE network_events SET location=:location WHERE id=:id"),{"location":buildings[index%len(buildings)],"id":row.id})
+        legacy = connection.execute(text("SELECT id FROM network_events WHERE location='Test Hall' ORDER BY timestamp, id")).all()
+        buildings = ("Atkins", "Mebane", "Grainger", "Friday")
+        for index, row in enumerate(legacy):
+            connection.execute(text("UPDATE network_events SET location=:location WHERE id=:id"),
+                               {"location": buildings[index % len(buildings)], "id": row.id})
+
+
 def initialize_database():
     Base.metadata.create_all(engine)
     # Keep existing demo databases usable when adding nullable/defaulted model fields.
@@ -40,11 +44,11 @@ def initialize_database():
             connection.execute(text("ALTER TABLE users ADD COLUMN technician_id INTEGER"))
         if "security_access" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN security_access BOOLEAN NOT NULL DEFAULT 0"))
-    # One-time, in-place correction of legacy synthetic locations.
-    migrate_legacy_network_locations()
-    seed()
-    with SessionLocal() as db:
-        seed_demo_endpoints(db)
+    migrate_operations(engine)
+    if demo_enabled():
+        seed()
+        with SessionLocal() as db:
+            seed_demo_endpoints(db)
 
 @app.on_event("startup")
 async def startup():

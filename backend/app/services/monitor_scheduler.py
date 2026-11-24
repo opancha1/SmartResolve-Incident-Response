@@ -3,10 +3,13 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from app.database import SessionLocal
-from app.models import AvailabilityState, MonitoredEndpoint, MonitorSchedulerLease
+from app.services.demo_config import demo_enabled
+from app.services.clock import now_utc, utc_naive
+from app.models import AvailabilityCheck, AvailabilityState, MonitoredEndpoint, MonitorSchedulerLease
 from app.services.availability import (AvailabilityRateLimited, monitor_interval_seconds,
     run_check)
 
@@ -17,14 +20,16 @@ def scheduler_enabled() -> bool:
     return os.environ.get("SMARTRESOLVE_MONITOR_ENABLED","true").strip().lower() not in {"0","false","no","off"}
 
 def _lease(owner_id: str, lease_seconds: int, now: datetime, release: bool=False) -> bool:
+    now=utc_naive(now)
     db=SessionLocal()
     try:
+        db.execute(text("BEGIN IMMEDIATE"))
         lease=db.get(MonitorSchedulerLease,LEASE_ID)
         if release:
             if lease and lease.owner_id==owner_id:
                 db.delete(lease);db.commit()
             return False
-        if lease and lease.owner_id!=owner_id and lease.lease_until>now:
+        if lease and lease.owner_id!=owner_id and utc_naive(lease.lease_until)>now:
             return False
         if lease is None:
             lease=MonitorSchedulerLease(id=LEASE_ID,owner_id=owner_id,lease_until=now+timedelta(seconds=lease_seconds))
@@ -46,6 +51,14 @@ def run_monitor_cycle() -> None:
         endpoints=db.query(MonitoredEndpoint).filter_by(enabled=True).order_by(MonitoredEndpoint.id).all()
         for endpoint in endpoints:
             try:
+                if endpoint.mode == "demo":
+                    if not demo_enabled():
+                        continue
+                    db.execute(text("BEGIN IMMEDIATE"))
+                    db.refresh(endpoint)
+                    if not endpoint.enabled or endpoint.mode != "demo":
+                        db.rollback()
+                        continue
                 run_check(db,endpoint)
                 db.commit()
             except AvailabilityRateLimited:
@@ -59,7 +72,10 @@ def run_monitor_cycle() -> None:
                     if state:
                         state.status="Unknown";state.consecutive_failures=0;state.response_ms=None
                         state.error_details="Monitoring cycle failed unexpectedly; availability could not be confirmed."
-                        state.last_checked_at=datetime.utcnow()
+                        state.last_checked_at=now_utc()
+                        db.add(AvailabilityCheck(endpoint_id=endpoint.id, result="Unknown", status_after_check="Unknown",
+                                                 error_details=state.error_details, checked_at=state.last_checked_at,
+                                                 generated_demo=bool(endpoint.scenario_override)))
                     db.commit()
                 except Exception:
                     db.rollback()
@@ -70,6 +86,7 @@ def run_monitor_cycle() -> None:
 async def monitor_scheduler_loop() -> None:
     owner_id=f"{os.getpid()}-{uuid.uuid4().hex}"
     interval=monitor_interval_seconds()
+    cycle = None
     try:
         while True:
             try:
@@ -77,9 +94,12 @@ async def monitor_scheduler_loop() -> None:
                 with SessionLocal() as db:
                     count=db.query(MonitoredEndpoint).filter_by(enabled=True).count()
                 lease_seconds=max(interval*2,interval+count*12+30)
-                if _lease(owner_id,lease_seconds,datetime.utcnow()):
-                    await asyncio.to_thread(run_monitor_cycle)
-                    delay=interval
+                if _lease(owner_id,lease_seconds,now_utc()):
+                    started = asyncio.get_running_loop().time()
+                    cycle = asyncio.create_task(asyncio.to_thread(run_monitor_cycle))
+                    await asyncio.shield(cycle)
+                    cycle = None
+                    delay = max(0, interval - (asyncio.get_running_loop().time() - started))
                 else:
                     delay=min(15,max(5,interval//4))
             except asyncio.CancelledError:
@@ -89,4 +109,8 @@ async def monitor_scheduler_loop() -> None:
                 delay=min(15,max(5,interval//4))
             await asyncio.sleep(delay)
     finally:
-        await asyncio.to_thread(_lease,owner_id,0,datetime.utcnow(),True)
+        try:
+            if cycle is not None:
+                await cycle
+        finally:
+            await asyncio.to_thread(_lease,owner_id,0,now_utc(),True)

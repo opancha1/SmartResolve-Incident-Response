@@ -4,6 +4,7 @@ from app.models import Technician, Ticket
 
 def recalculate_workloads(db:Session,technicians:list[Technician]|None=None)->list[Technician]:
     """Synchronize the cached workload column from active ticket assignments."""
+    db.flush()
     technicians=technicians if technicians is not None else db.query(Technician).all()
     assigned=db.query(Ticket.assigned_technician,func.count(Ticket.id)).filter(
         Ticket.status!="Resolved",Ticket.assigned_technician.is_not(None)

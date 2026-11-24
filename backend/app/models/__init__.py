@@ -5,6 +5,9 @@ from app.database import Base
 
 class Ticket(Base):
     __tablename__ = "tickets"
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    classification_corrected: Mapped[bool] = mapped_column(Boolean, default=False)
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text)
@@ -44,6 +47,12 @@ class TicketMessage(Base):
 
 class Incident(Base):
     __tablename__ = "incidents"
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+    demo_context: Mapped[bool] = mapped_column(Boolean, default=False)
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    assigned_technician: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confirmed_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(180))
     description: Mapped[str] = mapped_column(Text)
@@ -65,6 +74,7 @@ class IncidentRelationship(Base):
 
 class NetworkEvent(Base):
     __tablename__ = "network_events"
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     location: Mapped[str] = mapped_column(String(100))
     latency: Mapped[float] = mapped_column(Float)
@@ -76,6 +86,8 @@ class NetworkEvent(Base):
 
 class MonitoredEndpoint(Base):
     __tablename__ = "monitored_endpoints"
+    scenario_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     building: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     mode: Mapped[str] = mapped_column(String(20), default="demo")
@@ -99,6 +111,8 @@ class AvailabilityState(Base):
 
 class AvailabilityCheck(Base):
     __tablename__ = "availability_checks"
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    generated_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     id: Mapped[int] = mapped_column(primary_key=True)
     endpoint_id: Mapped[int] = mapped_column(ForeignKey("monitored_endpoints.id"), index=True)
     result: Mapped[str] = mapped_column(String(20))
@@ -115,6 +129,11 @@ class MonitorSchedulerLease(Base):
 
 class SecurityEvent(Base):
     __tablename__ = "security_events"
+    evidence_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    status: Mapped[str] = mapped_column(String(30), default="Open")
+    assigned_technician: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     event_type: Mapped[str] = mapped_column(String(80))
     username: Mapped[str] = mapped_column(String(100))
@@ -125,6 +144,7 @@ class SecurityEvent(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class Technician(Base):
+    demo_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     __tablename__ = "technicians"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
@@ -132,3 +152,18 @@ class Technician(Base):
     location: Mapped[str] = mapped_column(String(100))
     current_workload: Mapped[int] = mapped_column(Integer, default=0)
     availability: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class InvestigationEntry(Base):
+    __tablename__ = "investigation_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    record_type: Mapped[str] = mapped_column(String(20), index=True)
+    record_id: Mapped[int] = mapped_column(Integer, index=True)
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DismissedRecommendation(Base):
+    __tablename__ = "dismissed_recommendations"
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)

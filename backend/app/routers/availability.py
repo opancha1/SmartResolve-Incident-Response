@@ -1,12 +1,17 @@
-from datetime import datetime
+from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AvailabilityCheck, AvailabilityState, Incident, IncidentRelationship, MonitoredEndpoint, Technician, Ticket, User
 from app.schemas import AvailabilityCheckOut, AvailabilityEndpointCreate, AvailabilityEndpointOut, IncidentOut, TicketOut
+from app.services.clock import now_utc, wire_utc
+from app.services.locations import test_endpoint
+from app.services.monitor_scheduler import scheduler_enabled
 from app.services.auth import require_roles
 from app.services.availability import (AvailabilityRateLimited, related_open_tickets,
     effective_endpoint_status, monitor_interval_seconds, run_check, validate_live_target)
+from app.services.demo_config import demo_enabled
 from app.services.intelligence import calculate_priority, recommend_technician
 
 router=APIRouter(prefix="/api/network-availability",tags=["Network Availability"],
@@ -20,12 +25,16 @@ def get_endpoint_or_404(endpoint_id:int,db:Session)->MonitoredEndpoint:
 def to_output(endpoint:MonitoredEndpoint,db:Session,include_tickets:bool=True)->AvailabilityEndpointOut:
     state=db.query(AvailabilityState).filter_by(endpoint_id=endpoint.id).first()
     status,reason=effective_endpoint_status(endpoint,state)
+    monitoring_active = scheduler_enabled() and endpoint.enabled and (endpoint.mode != "demo" or demo_enabled())
+    if status == "Unknown" and endpoint.enabled and not monitoring_active:
+        inactive_reason = "Simulated checks require demo mode." if endpoint.mode == "demo" and not demo_enabled() else "Scheduled checks are disabled on this server."
+        reason = f"{reason or 'Availability is unconfirmed.'} {inactive_reason}"
     tickets=related_open_tickets(db,endpoint.building) if include_tickets else []
-    return AvailabilityEndpointOut(id=endpoint.id,building=endpoint.building,mode=endpoint.mode,
+    return AvailabilityEndpointOut(id=endpoint.id,is_test=test_endpoint(endpoint.building),scheduled_monitoring=monitoring_active,building=endpoint.building,mode=endpoint.mode,
         source="Simulated Demo" if endpoint.mode=="demo" else "Live Endpoint",enabled=endpoint.enabled,
         failure_threshold=endpoint.failure_threshold,status=status,
         monitor_interval_seconds=monitor_interval_seconds(),
-        consecutive_failures=state.consecutive_failures if state else 0,
+        consecutive_failures=min(state.consecutive_failures,endpoint.failure_threshold) if state and status!="Unknown" else 0,
         last_checked_at=state.last_checked_at if state else None,last_success_at=state.last_success_at if state else None,
         response_ms=state.response_ms if state and status!="Unknown" else None,error_details=reason,
         open_ticket_count=len(tickets),related_tickets=[TicketOut.model_validate(t) for t in tickets])
@@ -38,6 +47,13 @@ def list_endpoints(db:Session=Depends(get_db)):
 @router.post("/{endpoint_id}/check",response_model=AvailabilityEndpointOut)
 def check_endpoint(endpoint_id:int,db:Session=Depends(get_db)):
     endpoint=get_endpoint_or_404(endpoint_id,db)
+    if endpoint.mode == "demo":
+        if not demo_enabled():
+            raise HTTPException(403, "Demo mode is disabled")
+        db.execute(text("BEGIN IMMEDIATE"))
+        db.refresh(endpoint)
+        if endpoint.mode != "demo":
+            raise HTTPException(409, "Endpoint configuration changed; retry the check")
     try:
         run_check(db,endpoint)
         db.commit()
@@ -49,39 +65,44 @@ def check_endpoint(endpoint_id:int,db:Session=Depends(get_db)):
     return to_output(endpoint,db)
 
 @router.get("/{endpoint_id}/history",response_model=list[AvailabilityCheckOut])
-def check_history(endpoint_id:int,limit:int=50,db:Session=Depends(get_db)):
+def check_history(endpoint_id:int,limit:int=50,offset:int=0,db:Session=Depends(get_db)):
     endpoint=get_endpoint_or_404(endpoint_id,db)
     limit=max(1,min(limit,100))
-    return db.query(AvailabilityCheck).filter_by(endpoint_id=endpoint.id).order_by(AvailabilityCheck.checked_at.desc()).limit(limit).all()
+    return db.query(AvailabilityCheck).filter_by(endpoint_id=endpoint.id).order_by(AvailabilityCheck.checked_at.desc(), AvailabilityCheck.id.desc()).offset(max(0,offset)).limit(limit).all()
 
 @router.get("/{endpoint_id}/suggestion")
 def incident_suggestion(endpoint_id:int,db:Session=Depends(get_db)):
     endpoint=get_endpoint_or_404(endpoint_id,db)
     state=db.query(AvailabilityState).filter_by(endpoint_id=endpoint.id).first()
     status,_=effective_endpoint_status(endpoint,state)
-    tickets=related_open_tickets(db,endpoint.building)
+    tickets=[ticket for ticket in related_open_tickets(db,endpoint.building)
+             if ticket.category=="Network" and bool(ticket.demo_key)==bool(endpoint.scenario_override)]
     eligible=bool(state and status=="Offline" and len(tickets)>=2)
+    recovered=bool(state and status=="Online" and db.query(AvailabilityCheck).filter_by(
+        endpoint_id=endpoint.id, status_after_check="Offline").first())
     ticket_ids={ticket.id for ticket in tickets}
     active_incidents=[]
     if eligible:
         for incident in db.query(Incident).filter(Incident.status!="Resolved",Incident.category=="Network").all():
             linked=db.query(IncidentRelationship).filter_by(incident_id=incident.id,related_type="ticket").all()
             if ticket_ids.intersection({item.related_id for item in linked}): active_incidents.append(incident)
-    reason=(f"{endpoint.building} endpoint is Offline after {state.consecutive_failures} consecutive failed checks; "
+    reason=(f"{endpoint.building} endpoint is Offline after reaching the {endpoint.failure_threshold}-check failure threshold; "
             f"{len(tickets)} open ticket(s) match the building.") if eligible else None
-    return {"suggested":eligible,"reason":reason,"endpoint":{"id":endpoint.id,"building":endpoint.building,
+    return {"suggested":eligible,"recovered":recovered,"reason":reason,"endpoint":{"id":endpoint.id,"building":endpoint.building,
         "status":status,"source":"Simulated Demo" if endpoint.mode=="demo" else "Live Endpoint",
-        "consecutive_failures":state.consecutive_failures if state else 0,"failure_threshold":endpoint.failure_threshold,
-        "last_checked_at":state.last_checked_at if state else None},
+        "consecutive_failures":min(state.consecutive_failures,endpoint.failure_threshold) if state and status!="Unknown" else 0,"failure_threshold":endpoint.failure_threshold,
+        "last_checked_at":wire_utc(state.last_checked_at) if state and state.last_checked_at else None},
         "tickets":[TicketOut.model_validate(ticket) for ticket in tickets],
         "existing_incident":IncidentOut.model_validate(active_incidents[0]) if active_incidents else None}
 
 @router.post("/{endpoint_id}/incident")
 def create_or_link_incident(endpoint_id:int,db:Session=Depends(get_db)):
+    db.execute(text("BEGIN IMMEDIATE"))
     endpoint=get_endpoint_or_404(endpoint_id,db)
     state=db.query(AvailabilityState).filter_by(endpoint_id=endpoint.id).first()
     status,_=effective_endpoint_status(endpoint,state)
-    tickets=related_open_tickets(db,endpoint.building)
+    tickets=[ticket for ticket in related_open_tickets(db,endpoint.building)
+             if ticket.category=="Network" and bool(ticket.demo_key)==bool(endpoint.scenario_override)]
     if not state or status!="Offline" or len(tickets)<2:
         raise HTTPException(409,"Review requires an Offline endpoint and at least two matching open tickets")
     ticket_ids={ticket.id for ticket in tickets}
@@ -97,7 +118,7 @@ def create_or_link_incident(endpoint_id:int,db:Session=Depends(get_db)):
         tech,_=recommend_technician(db.query(Technician).all(),"Network",endpoint.building)
         priority=calculate_priority(sum(ticket.affected_users for ticket in tickets),"High",endpoint.building,evidence=True)
         incident=Incident(title=f"Possible network outage — {endpoint.building}",
-            description=f"Technician-reviewed correlation suggestion. Evidence: {endpoint.building} monitored endpoint is Offline after {state.consecutive_failures} consecutive failed checks (threshold {endpoint.failure_threshold}); last checked {state.last_checked_at.isoformat() if state.last_checked_at else 'unknown'}. Related ticket locations match this building. Monitoring source: {'simulated demo' if endpoint.mode=='demo' else 'live endpoint'}.",
+            description=f"Technician-reviewed correlation suggestion. Evidence: {endpoint.building} monitored endpoint is Offline after reaching the {endpoint.failure_threshold}-check failure threshold (threshold {endpoint.failure_threshold}); last checked {state.last_checked_at.isoformat() if state.last_checked_at else 'unknown'}. Related ticket locations match this building. Monitoring source: {'simulated demo' if endpoint.mode=='demo' else 'live endpoint'}.",
             category="Network",location=endpoint.building,priority=priority,
             recommended_technician=tech.name if tech else None,status="Open")
         db.add(incident);db.flush()
@@ -108,15 +129,17 @@ def create_or_link_incident(endpoint_id:int,db:Session=Depends(get_db)):
             db.add(IncidentRelationship(incident_id=incident.id,related_type="ticket",related_id=ticket.id,
                 reason=f"Open ticket at {ticket.location}; same building as Offline monitored endpoint."))
         linked_ids.append(ticket.id)
-    if ("availability",endpoint.id) not in existing_relations:
-        db.add(IncidentRelationship(incident_id=incident.id,related_type="availability",related_id=endpoint.id,
-            reason=f"{endpoint.building}: Offline after {state.consecutive_failures} consecutive failed checks; source is {'Simulated Demo' if endpoint.mode=='demo' else 'Live Endpoint'}."))
+    if ("availability",state.id) not in existing_relations:
+        db.add(IncidentRelationship(incident_id=incident.id,related_type="availability",related_id=state.id,
+            reason=f"{endpoint.building}: Offline after reaching the {endpoint.failure_threshold}-check failure threshold; source is {'Simulated Demo' if endpoint.mode=='demo' else 'Live Endpoint'}."))
     db.commit();db.refresh(incident)
     return {"created":created,"incident":IncidentOut.model_validate(incident),"linked_ticket_ids":linked_ids}
 
 @router.post("/endpoints",response_model=AvailabilityEndpointOut,status_code=201,
     dependencies=[Depends(require_roles("admin"))])
 def add_endpoint(data:AvailabilityEndpointCreate,db:Session=Depends(get_db)):
+    if data.mode == "demo" and not demo_enabled():
+        raise HTTPException(403, "Demo mode is disabled")
     if db.query(MonitoredEndpoint).filter_by(building=data.building).first(): raise HTTPException(409,"A monitored endpoint already exists for this building")
     if data.mode=="live":
         try: validate_live_target(data.target_url or "")
@@ -130,6 +153,10 @@ def add_endpoint(data:AvailabilityEndpointCreate,db:Session=Depends(get_db)):
     dependencies=[Depends(require_roles("admin"))])
 def update_endpoint(endpoint_id:int,data:AvailabilityEndpointCreate,db:Session=Depends(get_db)):
     endpoint=get_endpoint_or_404(endpoint_id,db)
+    if data.mode == "demo" and not demo_enabled():
+        raise HTTPException(403, "Demo mode is disabled")
+    if endpoint.scenario_override:
+        raise HTTPException(409, "Reset demo scenarios before reconfiguring this endpoint")
     duplicate=db.query(MonitoredEndpoint).filter(MonitoredEndpoint.building==data.building,MonitoredEndpoint.id!=endpoint_id).first()
     if duplicate: raise HTTPException(409,"A monitored endpoint already exists for this building")
     if data.mode=="live":
@@ -143,3 +170,26 @@ def update_endpoint(endpoint_id:int,data:AvailabilityEndpointCreate,db:Session=D
         state.error_details="Configuration changed; run a new availability check."
     for key,value in data.model_dump().items(): setattr(endpoint,key,value)
     db.commit();db.refresh(endpoint);return to_output(endpoint,db)
+
+
+@router.get("/{endpoint_id}/availability-summary")
+def availability_summary(endpoint_id: int, db: Session = Depends(get_db)):
+    endpoint = get_endpoint_or_404(endpoint_id, db)
+    now = now_utc()
+    start = now - timedelta(hours=24)
+    query = db.query(AvailabilityCheck).filter_by(endpoint_id=endpoint.id)
+    checks = query.filter(AvailabilityCheck.checked_at >= start, AvailabilityCheck.checked_at <= now).order_by(
+        AvailabilityCheck.checked_at, AvailabilityCheck.id).all()
+    counts = {label: sum(check.result == label for check in checks) for label in ("Online", "Failed", "Unknown")}
+    valid = counts["Online"] + counts["Failed"]
+    prior = query.filter(AvailabilityCheck.checked_at < start).order_by(
+        AvailabilityCheck.checked_at.desc(), AvailabilityCheck.id.desc()).first()
+    previous_status = prior.status_after_check if prior else None
+    transitions = []
+    for check in checks:
+        if previous_status is not None and check.status_after_check != previous_status:
+            transitions.append({"id": check.id, "status": check.status_after_check,
+                                "checked_at": wire_utc(check.checked_at)})
+        previous_status = check.status_after_check
+    return {"counts": counts, "transitions": transitions[-5:][::-1],
+            "success_percentage": round(100 * counts["Online"] / valid, 1) if valid >= 2 else None}

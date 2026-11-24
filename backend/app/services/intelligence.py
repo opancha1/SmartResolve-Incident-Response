@@ -2,18 +2,45 @@ import math
 import re
 from collections import Counter
 
+RULES = {
+    "Security": r"phish(?:ing)?|suspicious (?:email|login|activity|mfa)|malware|ransomware|unauthori[sz]ed access|compromised|credential theft",
+    "Printing and Scanning": r"print(?:er|ing)?|scan(?:ner|ning)?|print queue|paper jam|toner",
+    "Classroom Technology": r"document camera|doc cam|projector|lecture capture|smart ?board|classroom display|classroom av|podium|av system",
+    "Software": r"lockdown browser|respondus|software|applications?|install(?:ation)?|crash(?:ed|es|ing)?|canvas|license|update loop",
+    "Network": r"wi[ -]?fi|wireless|internet|network|ethernet|vpn|latency|packet loss|dns",
+    "Account": r"accounts?|password|log[ -]?in|sign[ -]?in|locked out|authentication|mfa|duo|permissions?|single sign.on|sso",
+    "Email and Collaboration": r"email|outlook|mailbox|teams|sharepoint|zoom|calendar|onedrive",
+    "Hardware": r"docking station|dock|laptop|monitor|keyboard|webcam|battery|mouse|charger|usb|computer",
+}
+
+def classification_details(title: str, description: str) -> dict:
+    if re.search(r"\b(?:classroom|lecture hall|podium)\b", f"{title} {description}", re.I):
+        if re.search(r"\b(?:webcam|microphone|display|camera)\b", f"{title} {description}", re.I):
+            return {"category": "Classroom Technology", "reason": "AV device and classroom context", "confidence": "Strong rule match"}
+    for category, pattern in RULES.items():
+        hit = re.search(r"\b(?:" + pattern + r")\b", f"{title} {description}", re.I)
+        if hit:
+            return {"category": category, "reason": f"Matched “{hit.group()}” in the report", "confidence": "Rule match"}
+    return {"category": "Other", "reason": "No support category rule matched", "confidence": "Unclassified"}
+
 def classify_ticket(title: str, description: str) -> str:
-    text = f"{title} {description}".lower()
-    rules = {"Security": ["phish", "password", "login", "malware", "suspicious", "hack"], "Network": ["wi-fi", "wifi", "internet", "network", "connect", "latency", "disconnect"], "Hardware": ["printer", "laptop", "monitor", "keyboard", "computer"], "Software": ["software", "app", "application", "install", "crash"], "Classroom Technology": ["projector", "classroom", "smart board", "microphone", "camera"], "Account": ["account", "access", "username", "permission"]}
-    return next((category for category, words in rules.items() if any(word in text for word in words)), "Other")
+    return classification_details(title, description)["category"]
+
+def priority_factors(affected_users, severity="Medium", location="", security=False, evidence=False):
+    factors = {
+        "Reported impact": min(40, affected_users * 4),
+        "Reported severity": {"Low": 5, "Medium": 15, "High": 28, "Critical": 40}.get(severity.title(), 15),
+    }
+    if "woodward" in location.lower() or "library" in location.lower():
+        factors["Location policy"] = 5
+    if security:
+        factors["Security issue type"] = 15
+    if evidence:
+        factors["Correlated incident evidence"] = 15
+    return factors
 
 def calculate_priority(affected_users: int, severity: str = "Medium", location: str = "", security: bool = False, evidence: bool = False) -> int:
-    score = min(40, affected_users * 4)
-    score += {"Low": 5, "Medium": 15, "High": 28, "Critical": 40}.get(severity.title(), 15)
-    if "woodward" in location.lower() or "library" in location.lower(): score += 5
-    if security: score += 15
-    if evidence: score += 15
-    return min(100, score)
+    return min(100, sum(priority_factors(affected_users, severity, location, security, evidence).values()))
 
 def priority_label(score: int) -> str:
     return "Critical" if score > 75 else "High" if score > 50 else "Medium" if score > 25 else "Low"
@@ -31,9 +58,12 @@ def network_reason(event) -> str:
     return "; ".join(reasons) or "Within demo thresholds"
 
 def security_risk(failed_attempts: int, event_type: str) -> int:
-    score = min(65, failed_attempts * 10)
-    if "suspicious" in event_type.lower(): score += 30
-    return min(100, score)
+    return min(100, sum(security_factors(failed_attempts, event_type).values()))
+
+def security_factors(failed_attempts: int, event_type: str) -> dict:
+    event = event_type.casefold()
+    weight = next((points for term, points in (("endpoint protection disabled", 55), ("privileged access", 45), ("password reset", 20), ("unauthorized", 45), ("phishing", 55), ("suspicious", 30), ("unusual", 30), ("lockout", 20)) if term in event), 0)
+    return {"Failed authentication attempts": min(65, failed_attempts * 10), "Event type": weight}
 
 def security_severity(score: int) -> str:
     return "Critical" if score >= 80 else "High" if score >= 55 else "Medium" if score >= 25 else "Low"
@@ -49,6 +79,15 @@ def cosine_similarity(first: str, second: str) -> float:
 def recommend_technician(technicians, category: str, location: str):
     matches = [t for t in technicians if t.availability]
     if not matches: return None, "No technician is currently available."
-    def score(t): return (50 if t.specialization.lower() == category.lower() else 0) + (20 if t.location.lower() == location.lower() else 0) - t.current_workload * 5
-    winner = max(matches, key=score)
-    return winner, f"{winner.name} matches {category}, is {'at' if winner.location.lower() == location.lower() else 'near'} {location}, and has workload {winner.current_workload}."
+    specialization = {"Printing and Scanning": "Hardware", "Email and Collaboration": "Software"}.get(category, category)
+    def score(technician):
+        return (50 if technician.specialization.casefold() == specialization.casefold() else 0) + (
+            20 if technician.location.casefold() == location.casefold() else 0
+        ) - technician.current_workload * 5
+    winner = min(matches, key=lambda technician: (-score(technician), technician.name))
+    reasons = [f"{winner.current_workload} unresolved assigned tickets"]
+    if winner.specialization.casefold() == specialization.casefold():
+        reasons.append("matching specialization")
+    if winner.location.casefold() == location.casefold():
+        reasons.append("matching location")
+    return winner, f"{winner.name}: {', '.join(reasons)}."
